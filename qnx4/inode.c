@@ -15,6 +15,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/fs_context.h>
 #include <linux/slab.h>
 #include <linux/highuid.h>
 #include <linux/pagemap.h>
@@ -148,7 +149,7 @@ static int qnx4_statfs(struct dentry *dentry, struct kstatfs *buf)
  * of the directory entry.
  */
 static const char *qnx4_checkroot(struct super_block *sb,
-				  struct qnx4_super_block *s)
+								  struct qnx4_super_block *s)
 {
 	struct buffer_head *bh;
 	struct qnx4_inode_entry *rootdir;
@@ -170,8 +171,8 @@ static const char *qnx4_checkroot(struct super_block *sb,
 			if (strcmp(rootdir->di_fname, QNX4_BMNAME) != 0)
 				continue;
 			qnx4_sb(sb)->BitMap = kmemdup(rootdir,
-						      sizeof(struct qnx4_inode_entry),
-						      GFP_KERNEL);
+										  sizeof(struct qnx4_inode_entry),
+										  GFP_KERNEL);
 			brelse(bh);
 			if (!qnx4_sb(sb)->BitMap)
 				return "not enough memory for bitmap inode";
@@ -183,8 +184,9 @@ static const char *qnx4_checkroot(struct super_block *sb,
 	return "bitmap file not found.";
 }
 
-static int qnx4_fill_super(struct super_block *s, void *data, int silent)
+static int qnx4_fill_super(struct super_block *s, struct fs_context *fc)
 {
+	int silent = fc->sb_flags & SB_SILENT;
 	struct buffer_head *bh;
 	struct inode *root;
 	const char *errmsg;
@@ -204,33 +206,33 @@ static int qnx4_fill_super(struct super_block *s, void *data, int silent)
 	s->s_time_max = U32_MAX;
 
 	/* Check the superblock signature. Since the qnx4 code is
-	   dangerous, we should leave as quickly as possible
-	   if we don't belong here... */
+	 *	   dangerous, we should leave as quickly as possible
+	 *	   if we don't belong here... */
 	bh = sb_bread(s, 1);
 	if (!bh) {
 		printk(KERN_ERR "qnx4: unable to read the superblock\n");
 		return -EINVAL;
 	}
 
- 	/* check before allocating dentries, inodes, .. */
+	/* check before allocating dentries, inodes, .. */
 	errmsg = qnx4_checkroot(s, (struct qnx4_super_block *) bh->b_data);
 	brelse(bh);
 	if (errmsg != NULL) {
- 		if (!silent)
+		if (!silent)
 			printk(KERN_ERR "qnx4: %s\n", errmsg);
 		return -EINVAL;
 	}
 
- 	/* does root not have inode number QNX4_ROOT_INO ?? */
+	/* does root not have inode number QNX4_ROOT_INO ?? */
 	root = qnx4_iget(s, QNX4_ROOT_INO * QNX4_INODES_PER_BLOCK);
 	if (IS_ERR(root)) {
 		printk(KERN_ERR "qnx4: get inode failed\n");
 		return PTR_ERR(root);
- 	}
+	}
 
- 	s->s_root = d_make_root(root);
- 	if (s->s_root == NULL)
- 		return -ENOMEM;
+	s->s_root = d_make_root(root);
+	if (s->s_root == NULL)
+		return -ENOMEM;
 
 	return 0;
 }
@@ -280,8 +282,8 @@ struct inode *qnx4_iget(struct super_block *sb, unsigned long ino)
 	QNX4DEBUG((KERN_INFO "reading inode : [%d]\n", ino));
 	if (!ino) {
 		printk(KERN_ERR "qnx4: bad inode number on dev %s: %lu is "
-				"out of range\n",
-		       sb->s_id, ino);
+		"out of range\n",
+		 sb->s_id, ino);
 		iget_failed(inode);
 		return ERR_PTR(-EIO);
 	}
@@ -289,24 +291,21 @@ struct inode *qnx4_iget(struct super_block *sb, unsigned long ino)
 
 	if (!(bh = sb_bread(sb, block))) {
 		printk(KERN_ERR "qnx4: major problem: unable to read inode from dev "
-		       "%s\n", sb->s_id);
+		"%s\n", sb->s_id);
 		iget_failed(inode);
 		return ERR_PTR(-EIO);
 	}
 	raw_inode = ((struct qnx4_inode_entry *) bh->b_data) +
-	    (ino % QNX4_INODES_PER_BLOCK);
+	(ino % QNX4_INODES_PER_BLOCK);
 
 	inode->i_mode    = le16_to_cpu(raw_inode->di_mode);
 	i_uid_write(inode, (uid_t)le16_to_cpu(raw_inode->di_uid));
 	i_gid_write(inode, (gid_t)le16_to_cpu(raw_inode->di_gid));
 	set_nlink(inode, le16_to_cpu(raw_inode->di_nlink));
 	inode->i_size    = le32_to_cpu(raw_inode->di_size);
-	inode->i_mtime.tv_sec   = le32_to_cpu(raw_inode->di_mtime);
-	inode->i_mtime.tv_nsec = 0;
-	inode->i_atime.tv_sec   = le32_to_cpu(raw_inode->di_atime);
-	inode->i_atime.tv_nsec = 0;
-	inode->i_ctime.tv_sec   = le32_to_cpu(raw_inode->di_ctime);
-	inode->i_ctime.tv_nsec = 0;
+	inode_set_mtime(inode, le32_to_cpu(raw_inode->di_mtime), 0);
+	inode_set_atime(inode, le32_to_cpu(raw_inode->di_atime), 0);
+	inode_set_ctime(inode, le32_to_cpu(raw_inode->di_ctime), 0);
 	inode->i_blocks  = le32_to_cpu(raw_inode->di_first_xtnt.xtnt_size);
 
 	memcpy(qnx4_inode, raw_inode, QNX4_DIR_ENTRY_SIZE);
@@ -324,7 +323,7 @@ struct inode *qnx4_iget(struct super_block *sb, unsigned long ino)
 		qnx4_i(inode)->mmu_private = inode->i_size;
 	} else {
 		printk(KERN_ERR "qnx4: bad inode %lu on dev %s\n",
-			ino, sb->s_id);
+			   ino, sb->s_id);
 		iget_failed(inode);
 		brelse(bh);
 		return ERR_PTR(-EIO);
@@ -360,10 +359,9 @@ static void init_once(void *foo)
 static int init_inodecache(void)
 {
 	qnx4_inode_cachep = kmem_cache_create("qnx4_inode_cache",
-					     sizeof(struct qnx4_inode_info),
-					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
-					     init_once);
+										  sizeof(struct qnx4_inode_info),
+										  0, (SLAB_RECLAIM_ACCOUNT|SLAB_ACCOUNT),
+										  init_once);
 	if (qnx4_inode_cachep == NULL)
 		return -ENOMEM;
 	return 0;
@@ -379,19 +377,30 @@ static void destroy_inodecache(void)
 	kmem_cache_destroy(qnx4_inode_cachep);
 }
 
-static struct dentry *qnx4_mount(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+static int qnx4_get_tree(struct fs_context *fc)
 {
-	return mount_bdev(fs_type, flags, dev_name, data, qnx4_fill_super);
+	return get_tree_bdev(fc, qnx4_fill_super);
+}
+
+static const struct fs_context_operations qnx4_context_ops = {
+	.get_tree   = qnx4_get_tree,
+};
+
+static int qnx4_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &qnx4_context_ops;
+	return 0;
 }
 
 static struct file_system_type qnx4_fs_type = {
-	.owner		= THIS_MODULE,
-	.name		= "qnx4",
-	.mount		= qnx4_mount,
-	.kill_sb	= qnx4_kill_sb,
-	.fs_flags	= FS_REQUIRES_DEV,
+	.owner           = THIS_MODULE,
+	.name            = "qnx4",
+	.init_fs_context = qnx4_init_fs_context,
+	.parameters      = NULL,
+	.kill_sb         = qnx4_kill_sb,
+	.fs_flags        = FS_REQUIRES_DEV,
 };
+
 MODULE_ALIAS_FS("qnx4");
 
 static int __init init_qnx4_fs(void)
@@ -421,4 +430,3 @@ static void __exit exit_qnx4_fs(void)
 module_init(init_qnx4_fs)
 module_exit(exit_qnx4_fs)
 MODULE_LICENSE("GPL");
-
