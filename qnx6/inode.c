@@ -12,6 +12,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/fs_context.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/highuid.h>
@@ -293,8 +294,10 @@ static struct buffer_head *qnx6_check_first_superblock(struct super_block *s,
 static struct inode *qnx6_private_inode(struct super_block *s,
 					struct qnx6_root_node *p);
 
-static int qnx6_fill_super(struct super_block *s, void *data, int silent)
+static int qnx6_fill_super(struct super_block *s, struct fs_context *fc)
 {
+	int silent = fc->sb_flags & SB_SILENT;
+
 	struct buffer_head *bh1 = NULL, *bh2 = NULL;
 	struct qnx6_super_block *sb1 = NULL, *sb2 = NULL;
 	struct qnx6_sb_info *sbi;
@@ -317,10 +320,10 @@ static int qnx6_fill_super(struct super_block *s, void *data, int silent)
 	}
 
 	/* parse the mount-options */
-	if (!qnx6_parse_options((char *) data, s)) {
-		pr_err("invalid mount options.\n");
-		goto outnobh;
-	}
+	if (!qnx6_parse_options(NULL, s)) {
+        pr_err("invalid mount options.\n");
+        goto outnobh;
+    }
 	if (test_opt(s, MMI_FS)) {
 		sb1 = qnx6_mmi_fill_super(s, silent);
 		if (sb1)
@@ -560,12 +563,9 @@ struct inode *qnx6_iget(struct super_block *sb, unsigned ino)
 	i_uid_write(inode, (uid_t)fs32_to_cpu(sbi, raw_inode->di_uid));
 	i_gid_write(inode, (gid_t)fs32_to_cpu(sbi, raw_inode->di_gid));
 	inode->i_size    = fs64_to_cpu(sbi, raw_inode->di_size);
-	inode->i_mtime.tv_sec   = fs32_to_cpu(sbi, raw_inode->di_mtime);
-	inode->i_mtime.tv_nsec = 0;
-	inode->i_atime.tv_sec   = fs32_to_cpu(sbi, raw_inode->di_atime);
-	inode->i_atime.tv_nsec = 0;
-	inode->i_ctime.tv_sec   = fs32_to_cpu(sbi, raw_inode->di_ctime);
-	inode->i_ctime.tv_nsec = 0;
+	inode_set_mtime(inode, fs32_to_cpu(sbi, raw_inode->di_mtime), 0);
+	inode_set_atime(inode, fs32_to_cpu(sbi, raw_inode->di_atime), 0);
+	inode_set_ctime(inode, fs32_to_cpu(sbi, raw_inode->di_ctime), 0);
 
 	/* calc blocks based on 512 byte blocksize */
 	inode->i_blocks = (inode->i_size + 511) >> 9;
@@ -618,10 +618,9 @@ static void init_once(void *foo)
 static int init_inodecache(void)
 {
 	qnx6_inode_cachep = kmem_cache_create("qnx6_inode_cache",
-					     sizeof(struct qnx6_inode_info),
-					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
-					     init_once);
+						sizeof(struct qnx6_inode_info),
+						0, (SLAB_RECLAIM_ACCOUNT|SLAB_ACCOUNT),
+						init_once);
 	if (!qnx6_inode_cachep)
 		return -ENOMEM;
 	return 0;
@@ -637,18 +636,28 @@ static void destroy_inodecache(void)
 	kmem_cache_destroy(qnx6_inode_cachep);
 }
 
-static struct dentry *qnx6_mount(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+static int qnx6_get_tree(struct fs_context *fc)
 {
-	return mount_bdev(fs_type, flags, dev_name, data, qnx6_fill_super);
+	return get_tree_bdev(fc, qnx6_fill_super);
+}
+
+static const struct fs_context_operations qnx6_context_ops = {
+	.get_tree   = qnx6_get_tree,
+};
+
+static int qnx6_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &qnx6_context_ops;
+	return 0;
 }
 
 static struct file_system_type qnx6_fs_type = {
-	.owner		= THIS_MODULE,
-	.name		= "qnx6",
-	.mount		= qnx6_mount,
-	.kill_sb	= kill_block_super,
-	.fs_flags	= FS_REQUIRES_DEV,
+	.owner           = THIS_MODULE,
+	.name            = "qnx6",
+	.init_fs_context = qnx6_init_fs_context,
+	.parameters      = NULL,
+	.kill_sb         = kill_block_super,
+	.fs_flags        = FS_REQUIRES_DEV,
 };
 MODULE_ALIAS_FS("qnx6");
 
